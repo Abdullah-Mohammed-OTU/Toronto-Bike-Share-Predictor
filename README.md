@@ -49,3 +49,18 @@ R · tidyverse · ggplot2 · lubridate · sf · scales · ggalluvial · ggtext �
 3. Knit the notebook. The neighbourhood boundaries download at runtime, so you'll need an internet connection.
 
 ## Screenshots
+
+### 1. Trips by Day of Week
+![Stacked bar chart of trips by day of week and time of day](Bar.png)
+
+### 2. Time-of-Day Breakdown
+![Pie chart of trip share by time of day](Pie.png)
+
+### 3. Trip Duration vs. Hour
+![Scatter plot of trip duration by departure hour with LOESS smooth](Dot.png)
+
+### 4. Trip Origins by Neighbourhood
+![Choropleth map of bike share departures by Toronto neighbourhood](Map.png)
+
+### 5. Trip Flow
+![Sankey diagram of trips from day type to time of day to trip length](Sankey.png)
