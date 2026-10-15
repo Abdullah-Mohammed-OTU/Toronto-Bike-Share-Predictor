@@ -1,0 +1,514 @@
+---
+title: "Toronto BikeShare Ridership Data Visualization for the month of January 2024"
+author: "Abdullah Mohammed | Student ID: 100784442"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: kate
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  message    = FALSE,
+  warning    = FALSE
+)
+```
+
+---
+
+## Libraries
+
+```{r libraries}
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(scales)
+library(ggalluvial)
+library(ggtext)
+```
+
+---
+
+## Introduction
+
+This dataset contains all the trips taken using Toronto's Bike Share system in January 2024. It initially was 27 MB but was reduced by ~65% to make the dataset <5 mb.  
+
+This report explores winter ridership patterns in Toronto. It asks: What are the main trends in January bike use? When do people ride most often? Are there any other notable patterns in the data? By examining when and where trips occur, the visualizations provide insight into how Toronto residents use Bike Share during the winter season. 
+
+The notebook includes six visualizations to answer these questions. A stacked bar chart shows how ridership varies by time of day across the days of the week. A pie chart summarizes the overall share of trips taken in each time period. A scatter plot with a smoothed trend line examines the relationship between departure hour and trip duration. A proportional stacked area chart shows how the share of short, medium, and long trips changes throughout the day. A choropleth map built with the sf library highlights which Toronto neighbourhoods generate the most departures. Finally, a Sankey alluvial diagram created with ggalluvial traces trip flow from day type to time of day to trip length category.
+
+---
+
+## 1 | Loading the Data
+
+```{r load-data}
+raw <- read_csv(
+  "data/Bike share ridership 2024-01-trimmed.csv",
+  show_col_types = FALSE
+)
+
+```
+
+---
+
+## 2 | Data Manipulation
+
+```{r manipulate}
+bikes <- raw %>%
+  rename(
+    duration_sec = `Trip  Duration`,
+    start_time   = `Start Time`,
+    start_lat    = lat,
+    start_lon    = lon
+  ) %>%
+  mutate(
+    # Parse datetime — format is m/d/Y H:M e.g. "01/06/2024 07:29"
+    start_time   = mdy_hm(start_time),
+
+    # Numeric duration
+    duration_min = duration_sec / 60,
+
+    # Time components
+    hour = hour(start_time),
+    dow  = wday(start_time, label = TRUE, abbr = TRUE, week_start = 1),
+
+    # Weekday / Weekend flag
+    is_weekend = dow %in% c("Sat", "Sun"),
+    day_type   = if_else(is_weekend, "Weekend", "Weekday"),
+
+    # Time-of-day buckets
+    time_of_day = case_when(
+      hour >= 6  & hour < 12 ~ "Morning",
+      hour >= 12 & hour < 17 ~ "Afternoon",
+      hour >= 17 & hour < 21 ~ "Evening",
+      TRUE                   ~ "Night"
+    ),
+    time_of_day = factor(time_of_day,
+                         levels = c("Morning", "Afternoon", "Evening", "Night")),
+
+    # Trip-length category
+    duration_cat = case_when(
+      duration_min <  10 ~ "Short (<10 min)",
+      duration_min <= 30 ~ "Medium (10-30 min)",
+      TRUE               ~ "Long (>30 min)"
+    ),
+    duration_cat = factor(duration_cat,
+                          levels = c("Short (<10 min)",
+                                     "Medium (10-30 min)",
+                                     "Long (>30 min)"))
+  ) %>%
+  filter(
+    duration_min >= 1,
+    duration_min <= 180,
+    !is.na(start_time),
+    !is.na(start_lat)
+  )
+
+```
+
+```{r summary-table}
+# Descriptive summary by day type and time of day
+bikes %>%
+  group_by(day_type, time_of_day) %>%
+  summarise(
+    trips      = n(),
+    median_min = round(median(duration_min), 1),
+    .groups    = "drop"
+  ) %>%
+  arrange(day_type, time_of_day)
+```
+
+---
+
+## 3 | Trips by Day of Week — Stacked Bar Chart
+
+How is ridership distributed across the week, and how does the mix of morning, afternoon, evening, and night trips change by day?
+
+```{r plot1-stacked-bar, fig.height=5.5, dpi=300}
+pal_tod <- c(
+  "Morning"   = "#f4a261",
+  "Afternoon" = "#2a9d8f",
+  "Evening"   = "#264653",
+  "Night"     = "#9b5de5"
+)
+
+daily_tod <- bikes %>%
+  count(dow, time_of_day, name = "trips")
+
+ggplot(daily_tod, aes(x = dow, y = trips, fill = time_of_day)) +
+  geom_bar(
+    stat      = "identity",
+    position  = "stack",
+    colour    = "white",
+    linewidth = 0.3
+  ) +
+  scale_fill_manual(values = pal_tod, name = "Time of Day") +
+  scale_y_continuous(
+    labels = comma_format(),
+    expand = expansion(mult = c(0, 0.06))
+  ) +
+  scale_x_discrete(
+    labels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+  ) +
+  labs(
+    title    = "Trips by Day of Week — Stacked by Time of Day",
+    x        = "Day of the Week",
+    y        = "Number of Trips",
+    caption  = "Source: Toronto Bikeshare Open Data"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 14,
+                                      margin = margin(b = 4)),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    legend.position    = "top",
+    legend.title       = element_text(face = "bold"),
+    plot.caption       = element_text(colour = "grey55", size = 8)
+  )
+```
+---
+
+## 4 | Time-of-Day Breakdown — Pie Chart
+
+What is the overall proportion of trips by time of day across the entire month?
+
+```{r plot2-donut, fig.height=6, dpi=300}
+tod_props <- bikes %>%
+  count(time_of_day, name = "trips") %>%
+  mutate(
+    pct   = trips / sum(trips) * 100,
+    time_of_day = factor(time_of_day,
+                         levels = rev(c("Morning", "Afternoon",
+                                        "Evening", "Night")))
+  )
+
+ggplot(tod_props, aes(x = 2, y = pct, fill = time_of_day)) +
+  geom_bar(
+    stat      = "identity",
+    colour    = "white",
+    linewidth = 0.5
+  ) +
+  coord_polar(theta = "y") +
+  xlim(0.5, 2.5) +
+  scale_fill_manual(values = pal_tod, name = "Time of Day") +
+  scale_x_continuous(name = NULL) +
+  scale_y_continuous(name = NULL) +
+  # Add percentage labels inside the pie chart
+  geom_text(
+    aes(label = paste0(round(pct, 1), "%")),
+    position = position_stack(vjust = 0.5),
+    colour   = "white",
+    fontface = "bold",
+    size     = 4
+  ) +
+  labs(
+    title   = "Proportion of January Trips by Time of Day",
+    caption = "Source: Toronto Bikeshare Open Data"
+  ) +
+  theme_void(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14, hjust = 0.5,
+                                 margin = margin(b = 4)),
+    plot.caption  = element_text(colour = "grey55", size = 8, hjust = 0.5,
+                                 margin = margin(t = 8)),
+    legend.position = "right",
+    legend.title    = element_text(face = "bold")
+  )
+```
+.
+
+---
+
+## 5 | Trip Duration vs Hour — Scatter Plot with Smooth
+
+Does the time of day a trip starts predict how long it will be?
+
+```{r plot3-scatter-smooth, fig.height=5.5, dpi=300}
+# Reduce the amount of data points being used slightly to make the graph easier to read
+set.seed(42)
+bikes_sample <- bikes %>%
+  filter(duration_min <= 45) %>%
+  slice_sample(n = min(8000, nrow(.)))
+
+ggplot(bikes_sample, aes(x = hour, y = duration_min)) +
+  geom_point(
+    aes(colour = time_of_day),
+    alpha = 0.25,
+    size  = 1.2
+  ) +
+  geom_smooth(
+    method  = "loess",
+    colour  = "#e63946",
+    fill    = "#e63946",
+    alpha   = 0.2,
+    linewidth = 1.2,
+    se      = TRUE
+  ) +
+  scale_colour_manual(values = pal_tod, name = "Time of Day") +
+  scale_x_continuous(
+    breaks = seq(0, 23, 3),
+    labels = function(h) paste0(h, ":00")
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 45, 5),
+    labels = function(x) paste0(x, " min"),
+    expand = expansion(mult = c(0.02, 0.05))
+  ) +
+  labs(
+    title    = "Trip Duration vs Hour of Departure",
+    subtitle = "Red line = LOESS smooth with 95% CI",
+    x        = "Hour of Departure",
+    y        = "Trip Duration",
+    caption  = "Source: Toronto Bikeshare Open Data"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14,
+                                 margin = margin(b = 4)),
+    plot.subtitle = element_text(colour = "grey45", size = 10,
+                                 margin = margin(b = 10)),
+    panel.grid.minor  = element_blank(),
+    legend.position   = "bottom",
+    legend.title      = element_text(face = "bold"),
+    plot.caption      = element_text(colour = "grey55", size = 8)
+  )
+```
+
+---
+
+## 6 | Trip Length Mix by Hour — Proportional Stacked Area Chart
+
+How does the share of Short, Medium, and Long trips change across the day?
+
+```{r plot4-prop-area, fig.height=5.5, dpi=300}
+pal_dur <- c(
+  "Short (<10 min)"    = "#118ab2",
+  "Medium (10-30 min)" = "#06d6a0",
+  "Long (>30 min)"     = "#ef476f"
+)
+
+hourly_dur <- bikes %>%
+  count(hour, duration_cat, name = "trips")
+
+ggplot(hourly_dur, aes(x = hour, y = trips, fill = duration_cat)) +
+  geom_area(
+    position  = "fill",     
+    colour    = "white",
+    linewidth = 0.3,
+    alpha     = 0.88
+  ) +
+  scale_fill_manual(
+    values = pal_dur,
+    name   = "Trip Length",
+    # Reverse legend so Short is at top (matches bottom of chart)
+    guide  = guide_legend(reverse = TRUE)
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 23, 3),
+    labels = function(h) paste0(h, ":00"),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    expand = c(0, 0)
+  ) +
+  labs(
+    title    = "Proportion of Trip Lengths Across Hours of the Day",
+    x        = "Hour of Day",
+    y        = "Share of Trips",
+    caption  = "Source: Toronto Bikeshare Open Data"
+  ) +
+  theme_light(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14,
+                                 margin = margin(b = 4)),
+    panel.grid.minor  = element_blank(),
+    panel.border      = element_blank(),
+    axis.ticks        = element_blank(),
+    legend.position   = "right",
+    legend.title      = element_text(face = "bold"),
+    plot.caption      = element_text(colour = "grey55", size = 8)
+  )
+```
+
+---
+
+## 7 | Geographic Distribution — Choropleth Map
+
+Which Toronto neighbourhoods generate the most January trip departures?
+
+```{r load-neighbourhoods, cache=TRUE}
+# Toronto neighbourhood boundaries — City of Toronto Open Data Portal
+nbhd_url <- paste0(
+  "https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/",
+  "fc443770-ef0a-4025-9c2c-2cb558bfab00/resource/",
+  "0719053b-28b7-48ea-b863-068823a93aaa/download/",
+  "neighbourhoods-4326.geojson"
+)
+
+nbhd <- st_read(nbhd_url, quiet = TRUE)
+cat("Neighbourhood columns:", paste(names(nbhd), collapse = ", "), "\n")
+cat("Neighbourhoods loaded:", nrow(nbhd), "\n")
+```
+
+```{r choropleth-prep}
+# Convert trip start points to an sf object
+trips_sf <- bikes %>%
+  filter(!is.na(start_lat), !is.na(start_lon)) %>%
+  st_as_sf(coords = c("start_lon", "start_lat"), crs = 4326)
+
+# Spatial join: assign each trip to the neighbourhood it falls within
+nbhd_counts <- st_join(trips_sf, nbhd["AREA_NAME"]) %>%
+  st_drop_geometry() %>%
+  count(AREA_NAME, name = "total_trips")
+
+# Left join counts back onto the neighbourhood polygons
+nbhd_plot <- nbhd %>%
+  left_join(nbhd_counts, by = "AREA_NAME")
+
+cat("Neighbourhoods with trips:", sum(!is.na(nbhd_plot$total_trips)), "\n")
+```
+
+```{r plot5-map, fig.height=7.5, dpi=300}
+ggplot(nbhd_plot) +
+  geom_sf(
+    aes(fill = total_trips),
+    colour    = "white",
+    linewidth = 0.18
+  ) +
+  scale_fill_distiller(
+    palette   = "YlOrRd",
+    direction = 1,
+    na.value  = "grey88",
+    labels    = comma_format(),
+    name      = "Trips",
+    guide     = guide_colourbar(
+      barwidth  = 0.8,
+      barheight = 10,
+      ticks     = FALSE
+    )
+  ) +
+  labs(
+    title    = "Bikeshare Trip Origins by Toronto Neighbourhood",
+    caption  = "Sources: Toronto Bikeshare Open Data; City of Toronto Open Data (Neighbourhoods)"
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    plot.title      = element_text(face = "bold", size = 14, hjust = 0.5,
+                                   margin = margin(b = 4)),
+    plot.subtitle   = element_text(hjust = 0.5, colour = "grey40",
+                                   margin = margin(b = 8)),
+    plot.caption    = element_text(hjust = 0.5, colour = "grey55", size = 8,
+                                   margin = margin(t = 8)),
+    legend.position = c(0.92, 0.55),
+    legend.title    = element_text(face = "bold", size = 9),
+    plot.background = element_rect(fill = "#f7f7f5", colour = NA),
+    plot.margin     = margin(15, 15, 15, 15)
+  )
+```
+
+---
+
+## 8 | Trip Flow — Alluvial / Sankey Diagram *(Novel Graphic)*
+
+
+```{r plot6-alluvial, fig.height=7, dpi=300}
+alluvial_data <- bikes %>%
+  count(day_type, time_of_day, duration_cat, name = "trips") %>%
+  filter(trips > 30)
+
+ggplot(
+  alluvial_data,
+  aes(
+    axis1 = day_type,
+    axis2 = time_of_day,
+    axis3 = duration_cat,
+    y     = trips
+  )
+) +
+  geom_alluvium(
+    aes(fill    = time_of_day),
+    width      = 1 / 10,
+    alpha      = 0.75,
+    knot.pos   = 0.38,
+    curve_type = "sigmoid"
+  ) +
+  geom_stratum(
+    width     = 1 / 5,
+    fill      = "white",
+    colour    = "grey30",
+    linewidth = 0.45
+  ) +
+  geom_label(
+    stat       = "stratum",
+    aes(label  = after_stat(stratum)),
+    size       = 3.4,
+    fontface   = "bold",
+    colour     = "grey20",
+    label.size = 0,
+    fill       = "white"
+  ) +
+  scale_x_discrete(
+    limits = c("Day Type", "Time of Day", "Trip Length"),
+    expand = expansion(add = 0.35)
+  ) +
+  scale_y_continuous(
+    labels = comma_format(),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_fill_manual(values = pal_tod, name = "Time of Day") +
+  labs(
+    title    = "Trip Flow: Day Type \u2192 Time of Day \u2192 Trip Length",
+    subtitle = "Ribbon widths proportional to number of trips",
+    y        = "Number of Trips",
+    caption  = "Source: Toronto Bikeshare Open Data"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 14,
+                                      margin = margin(b = 4)),
+    plot.subtitle      = element_text(colour = "grey45", size = 10,
+                                      margin = margin(b = 10)),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    axis.title.x       = element_blank(),
+    axis.text.x        = element_text(face = "bold", size = 13,
+                                      colour = "grey20"),
+    axis.text.y        = element_text(colour = "grey50"),
+    legend.position    = "bottom",
+    legend.title       = element_text(face = "bold"),
+    plot.caption       = element_text(colour = "grey55", size = 8),
+    plot.background    = element_rect(fill = "#fafaf8", colour = NA)
+  )
+```
+
+---
+
+## 9 | Conclusion
+
+Together, the six visualizations tell a clear story. The stacked bar chart and pie chart show that morning and evening are the busiest periods, while weekdays generate more trips than weekends. The scatter plot suggests that trips beginning during commuter hours tend to be shorter, and the proportional area chart shows that short trips dominate overall, though long trips make up a larger share during the early morning. The choropleth map reveals that demand is concentrated in Toronto’s downtown core. The Sankey diagram reinforces this pattern by showing that Weekday → Morning → Short is the most common trip flow. Overall, the findings suggest that Toronto’s Bike Share system functions mainly as a winter commuting tool, especially in the downtown core, while still supporting some recreational use. 
+
+---
+
+## References
+
+1. **Toronto Bikeshare Ridership Data** — City of Toronto Open Data Portal.
+   https://open.toronto.ca/dataset/bike-share-toronto-ridership-data/
+
+2. **Toronto Neighbourhood Boundaries** — City of Toronto Open Data Portal.
+   https://open.toronto.ca/dataset/neighbourhoods/
+
+3. **Toronto Bikeshare Station Information (GBFS)**.
+   https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_information
+
+4. **ggalluvial** — Brunson J, Read Q (2024). *ggalluvial: Alluvial Plots in ggplot2*.
+   https://corybrunson.github.io/ggalluvial/
+
+5. **sf: Simple Features for R** — Pebesma E (2018). *The R Journal*, 10(1), 439–446.
+   https://r-spatial.github.io/sf/
